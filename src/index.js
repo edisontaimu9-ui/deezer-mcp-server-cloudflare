@@ -1,4 +1,5 @@
 const API = "https://api.deezer.com";
+let OWNER_ID = "6901640743"; // owner account; override with DEEZER_USER_ID env var
 const SERVER_INFO = { name: "deezer-mcp-server-cloudflare", version: "1.0.0" };
 
 async function dz(path, params = {}) {
@@ -53,6 +54,16 @@ const limitProps = (extra = {}) => ({
   properties: { id: { type: "integer", description: "Deezer ID" }, limit: { type: "integer", description: "Max results (1-50, default 10)" }, ...extra },
   required: ["id"],
 });
+
+const ownerProps = (extra = {}) => ({
+  type: "object",
+  properties: {
+    id: { type: "integer", description: "Deezer user ID. Omit to use the owner's own account (default)." },
+    limit: { type: "integer", description: "Max results (1-50, default 25)" },
+    ...extra,
+  },
+});
+const uid = (a) => a.id ?? OWNER_ID;
 
 const TOOLS = [
   {
@@ -158,30 +169,44 @@ const TOOLS = [
   },
   {
     name: "get_user",
-    description: "Get a public Deezer user profile by user ID (find it in the profile URL: deezer.com/profile/<id>).",
-    inputSchema: idProp("user"),
+    description: "Get the owner's Deezer profile (default) or any public user's profile by ID.",
+    inputSchema: ownerProps(),
     run: async (a) => {
-      const u = await dz(`/user/${a.id}`);
+      const u = await dz(`/user/${uid(a)}`);
       return { id: u.id, name: u.name, country: u.country, link: u.link, picture: u.picture_medium };
     },
   },
   {
-    name: "get_user_playlists",
-    description: "List a user's public playlists by Deezer user ID.",
-    inputSchema: limitProps(),
-    run: async (a) => (await dz(`/user/${a.id}/playlists`, { limit: lim(a.limit, 25) })).data.map(playlist),
+    name: "get_my_playlists",
+    description: "List the owner's Deezer playlists (default account, no ID needed). Optional id for another public user.",
+    inputSchema: ownerProps(),
+    run: async (a) => (await dz(`/user/${uid(a)}/playlists`, { limit: lim(a.limit, 50) })).data.map(playlist),
   },
   {
-    name: "get_user_favorite_tracks",
-    description: "List a user's favorite (loved) tracks. Works only if the user's favorites are public.",
-    inputSchema: limitProps(),
-    run: async (a) => (await dz(`/user/${a.id}/tracks`, { limit: lim(a.limit, 25) })).data.map(track),
+    name: "get_my_favorite_tracks",
+    description: "List the owner's favorite (loved) tracks (default account, no ID needed). Optional id for another public user.",
+    inputSchema: ownerProps(),
+    run: async (a) => (await dz(`/user/${uid(a)}/tracks`, { limit: lim(a.limit, 25) })).data.map(track),
   },
   {
-    name: "get_user_favorite_artists",
-    description: "List a user's favorite artists. Works only if the user's favorites are public.",
-    inputSchema: limitProps(),
-    run: async (a) => (await dz(`/user/${a.id}/artists`, { limit: lim(a.limit, 25) })).data.map(artist),
+    name: "get_my_favorite_artists",
+    description: "List the owner's favorite artists (default account, no ID needed). Optional id for another public user.",
+    inputSchema: ownerProps(),
+    run: async (a) => (await dz(`/user/${uid(a)}/artists`, { limit: lim(a.limit, 25) })).data.map(artist),
+  },
+  {
+    name: "find_my_playlist",
+    description: "Find one of the owner's playlists by (partial) name and return it with its tracks. Use for 'what's in my Gospel playlist'.",
+    inputSchema: { type: "object", properties: { name: { type: "string", description: "Full or partial playlist name" }, limit: { type: "integer", description: "Max tracks (1-50, default 25)" } }, required: ["name"] },
+    run: async (a) => {
+      const all = (await dz(`/user/${OWNER_ID}/playlists`, { limit: 100 })).data;
+      const q = a.name.toLowerCase();
+      const hits = all.filter((p) => p.title.toLowerCase().includes(q));
+      if (!hits.length) return { error: "No playlist matches", available: all.map((p) => p.title) };
+      const best = hits.find((p) => p.title.toLowerCase() === q) || hits[0];
+      const p = await dz(`/playlist/${best.id}`);
+      return { ...playlist(p), other_matches: hits.filter((h) => h.id !== best.id).map((h) => h.title), tracklist: (p.tracks?.data || []).slice(0, lim(a.limit, 25)).map(track) };
+    },
   },
 ];
 
@@ -220,7 +245,8 @@ const CORS = {
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...CORS } });
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
+    if (env && env.DEEZER_USER_ID) OWNER_ID = String(env.DEEZER_USER_ID);
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === "/" ) return json({ ...SERVER_INFO, mcp_endpoint: "/mcp", tools: TOOLS.length });
