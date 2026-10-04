@@ -156,6 +156,33 @@ const TOOLS = [
     inputSchema: limitProps(),
     run: async (a) => (await dz(`/genre/${a.id}/artists`)).data.slice(0, lim(a.limit)).map(artist),
   },
+  {
+    name: "get_user",
+    description: "Get a public Deezer user profile by user ID (find it in the profile URL: deezer.com/profile/<id>).",
+    inputSchema: idProp("user"),
+    run: async (a) => {
+      const u = await dz(`/user/${a.id}`);
+      return { id: u.id, name: u.name, country: u.country, link: u.link, picture: u.picture_medium };
+    },
+  },
+  {
+    name: "get_user_playlists",
+    description: "List a user's public playlists by Deezer user ID.",
+    inputSchema: limitProps(),
+    run: async (a) => (await dz(`/user/${a.id}/playlists`, { limit: lim(a.limit, 25) })).data.map(playlist),
+  },
+  {
+    name: "get_user_favorite_tracks",
+    description: "List a user's favorite (loved) tracks. Works only if the user's favorites are public.",
+    inputSchema: limitProps(),
+    run: async (a) => (await dz(`/user/${a.id}/tracks`, { limit: lim(a.limit, 25) })).data.map(track),
+  },
+  {
+    name: "get_user_favorite_artists",
+    description: "List a user's favorite artists. Works only if the user's favorites are public.",
+    inputSchema: limitProps(),
+    run: async (a) => (await dz(`/user/${a.id}/artists`, { limit: lim(a.limit, 25) })).data.map(artist),
+  },
 ];
 
 async function handleRpc(msg) {
