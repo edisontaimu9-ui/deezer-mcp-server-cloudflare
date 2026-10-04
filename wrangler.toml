@@ -1,0 +1,3 @@
+name = "deezer-mcp-server-cloudflare"
+main = "src/index.js"
+compatibility_date = "2025-01-01"

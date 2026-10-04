@@ -1,0 +1,8 @@
+{
+  "name": "deezer-mcp-server-cloudflare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "description": "Deezer public API exposed as a remote MCP server on Cloudflare Workers (no dependencies)"
+}
