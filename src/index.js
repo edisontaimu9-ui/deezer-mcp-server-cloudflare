@@ -210,7 +210,113 @@ const TOOLS = [
   },
 ];
 
-async function handleRpc(msg) {
+// ---------- Owner-only write tools (unofficial Deezer gateway, ARL cookie) ----------
+// Served ONLY at /mcp/<MCP_KEY>. Needs Worker secrets: DEEZER_ARL and MCP_KEY.
+const GW = "https://www.deezer.com/ajax/gw-light.php";
+const UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36";
+let gwSession = null;
+
+async function gwLogin(env, force = false) {
+  if (!env?.DEEZER_ARL) throw new Error("DEEZER_ARL secret is not set on the Worker");
+  if (!force && gwSession && Date.now() - gwSession.at < 10 * 60 * 1000) return gwSession;
+  const r = await fetch(`${GW}?method=deezer.getUserData&input=3&api_version=1.0&api_token=`, {
+    method: "POST",
+    headers: { Cookie: `arl=${env.DEEZER_ARL}`, "User-Agent": UA, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const sc = typeof r.headers.getSetCookie === "function" ? r.headers.getSetCookie() : [];
+  const sid = sc.map((c) => c.match(/(?:^|\s)sid=([^;]+)/)?.[1]).find(Boolean);
+  const j = await r.json();
+  const u = j?.results?.USER;
+  if (!u || !u.USER_ID) throw new Error("ARL is invalid or expired — refresh the DEEZER_ARL secret");
+  gwSession = { token: j.results.checkForm, cookie: `arl=${env.DEEZER_ARL}` + (sid ? `; sid=${sid}` : ""), userId: u.USER_ID, name: u.BLOG_NAME || u.NAME, at: Date.now() };
+  return gwSession;
+}
+
+async function gw(env, method, body, retry = true) {
+  const ses = await gwLogin(env);
+  const r = await fetch(`${GW}?method=${method}&input=3&api_version=1.0&api_token=${encodeURIComponent(ses.token)}`, {
+    method: "POST",
+    headers: { Cookie: ses.cookie, "User-Agent": UA, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const j = await r.json();
+  const e = j?.error;
+  if (e && Object.keys(e).length) {
+    if (retry && JSON.stringify(e).includes("TOKEN")) { gwSession = null; await gwLogin(env, true); return gw(env, method, body, false); }
+    throw new Error(`Deezer gateway error: ${JSON.stringify(e)}`);
+  }
+  return j.results;
+}
+
+const ids = (arr) => {
+  if (!Array.isArray(arr) || !arr.length) throw new Error("track_ids must be a non-empty array of Deezer track IDs");
+  return arr.slice(0, 100).map((x) => [parseInt(x, 10), 0]);
+};
+const trackIdsProp = { type: "array", items: { type: "integer" }, description: "Deezer track IDs (get them from search_tracks). Max 100." };
+
+const WRITE_TOOLS = [
+  {
+    name: "deezer_account_status",
+    description: "Check that write access to the owner's Deezer account works (returns user ID and name only).",
+    inputSchema: { type: "object", properties: {} },
+    run: async (a, env) => { const s = await gwLogin(env, true); return { ok: true, user_id: s.userId, name: s.name }; },
+  },
+  {
+    name: "create_playlist",
+    description: "Create a playlist in the owner's Deezer account, optionally with tracks. Private by default.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        description: { type: "string" },
+        track_ids: trackIdsProp,
+        public: { type: "boolean", description: "Make it public (default false = private)" },
+      },
+      required: ["title"],
+    },
+    run: async (a, env) => {
+      const songs = a.track_ids?.length ? ids(a.track_ids) : [];
+      const id = await gw(env, "playlist.create", { title: a.title, description: a.description || "", status: a.public ? 0 : 1, songs });
+      return { playlist_id: id, tracks_added: songs.length, link: `https://www.deezer.com/playlist/${id}` };
+    },
+  },
+  {
+    name: "add_tracks_to_playlist",
+    description: "Add tracks to one of the owner's playlists (appends to the end).",
+    inputSchema: { type: "object", properties: { playlist_id: { type: "integer" }, track_ids: trackIdsProp }, required: ["playlist_id", "track_ids"] },
+    run: async (a, env) => {
+      const songs = ids(a.track_ids);
+      await gw(env, "playlist.addSongs", { playlist_id: String(a.playlist_id), songs, offset: -1 });
+      return { ok: true, tracks_added: songs.length, link: `https://www.deezer.com/playlist/${a.playlist_id}` };
+    },
+  },
+  {
+    name: "remove_tracks_from_playlist",
+    description: "Remove tracks from one of the owner's playlists.",
+    inputSchema: { type: "object", properties: { playlist_id: { type: "integer" }, track_ids: trackIdsProp }, required: ["playlist_id", "track_ids"] },
+    run: async (a, env) => {
+      const songs = ids(a.track_ids);
+      await gw(env, "playlist.deleteSongs", { playlist_id: String(a.playlist_id), songs });
+      return { ok: true, tracks_removed: songs.length };
+    },
+  },
+  {
+    name: "add_favorite_track",
+    description: "Add a track to the owner's Deezer favorites (loved tracks).",
+    inputSchema: { type: "object", properties: { track_id: { type: "integer" } }, required: ["track_id"] },
+    run: async (a, env) => { await gw(env, "favorite_song.add", { SNG_ID: String(a.track_id) }); return { ok: true }; },
+  },
+  {
+    name: "remove_favorite_track",
+    description: "Remove a track from the owner's Deezer favorites.",
+    inputSchema: { type: "object", properties: { track_id: { type: "integer" } }, required: ["track_id"] },
+    run: async (a, env) => { await gw(env, "favorite_song.remove", { SNG_ID: String(a.track_id) }); return { ok: true }; },
+  },
+];
+
+async function handleRpc(msg, ctx = {}) {
+  const tools = ctx.full ? [...TOOLS, ...WRITE_TOOLS] : TOOLS;
   const { id, method, params } = msg || {};
   if (id === undefined) return null; // notification
   const ok = (result) => ({ jsonrpc: "2.0", id, result });
@@ -221,12 +327,12 @@ async function handleRpc(msg) {
     case "ping":
       return ok({});
     case "tools/list":
-      return ok({ tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
+      return ok({ tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
     case "tools/call": {
-      const tool = TOOLS.find((t) => t.name === params?.name);
+      const tool = tools.find((t) => t.name === params?.name);
       if (!tool) return err(-32602, `Unknown tool: ${params?.name}`);
       try {
-        const data = await tool.run(params.arguments || {});
+        const data = await tool.run(params.arguments || {}, ctx.env);
         return ok({ content: [{ type: "text", text: JSON.stringify(data) }] });
       } catch (e) {
         return ok({ content: [{ type: "text", text: `Error: ${e.message}` }], isError: true });
@@ -250,15 +356,22 @@ export default {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (url.pathname === "/" ) return json({ ...SERVER_INFO, mcp_endpoint: "/mcp", tools: TOOLS.length });
-    if (url.pathname !== "/mcp") return json({ error: "Not found" }, 404);
+    const m = url.pathname.match(/^\/mcp(?:\/([^/]+))?$/);
+    if (!m) return json({ error: "Not found" }, 404);
+    let full = false;
+    if (m[1]) {
+      if (!env?.MCP_KEY || m[1] !== env.MCP_KEY) return json({ error: "Not found" }, 404);
+      full = true;
+    }
+    const ctx = { env, full };
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
     let body;
     try { body = await request.json(); } catch { return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400); }
     if (Array.isArray(body)) {
-      const out = (await Promise.all(body.map(handleRpc))).filter(Boolean);
+      const out = (await Promise.all(body.map((b) => handleRpc(b, ctx)))).filter(Boolean);
       return out.length ? json(out) : new Response(null, { status: 202, headers: CORS });
     }
-    const out = await handleRpc(body);
+    const out = await handleRpc(body, ctx);
     return out ? json(out) : new Response(null, { status: 202, headers: CORS });
   },
 };
